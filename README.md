@@ -56,21 +56,11 @@ python scripts\run_llava_vqa.py ^
 ```
 
 ## Mask Backend Stub
-Options:
-- `scripts/mask_backend_stub.py`: placeholder FastAPI service returning random boxes.
-- `scripts/mask_backend.py`: FastAPI service using transformers zero-shot detection (Grounding DINO via `IDEA-Research/grounding-dino-base`) and optional SAM masks (set `SAM_CHECKPOINT` and `SAM_MODEL_TYPE`).
-
+A placeholder FastAPI service is in `scripts/mask_backend_stub.py`. It returns random boxes; replace with Grounding DINO + SAM/SAM2 to generate real masks per VQA label.
 Run stub (dev):
 ```bash
 python scripts\mask_backend_stub.py
 # will serve at http://localhost:8000/propose_masks
-```
-
-Run mask backend (needs transformers, torch, optional segment-anything):
-```bash
-# set SAM_CHECKPOINT if you want masks; otherwise only boxes are returned
-python scripts\mask_backend.py
-# POST /propose_masks with {image_path, labels, box_threshold, text_threshold, top_k, return_masks}
 ```
 
 ## Notes
