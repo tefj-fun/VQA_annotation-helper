@@ -6,9 +6,7 @@ Desktop helper to guide image annotation with a vision-language model. Loads a l
 - LLaVA 1.5 VQA (7B) via `transformers`, CUDA-capable.
 - Load `metadata.jsonl`, browse guide/step captions; auto-link images to steps.
 - Step-aware prompts; concise bullets with class labels/positions.
-- Two UIs:
-  - Tkinter GUI: `scripts/llava_gui.py`
-  - PyQt GUI: `scripts/llava_gui_qt.py` with mask list/filter, show/hide rejected overlays, truncated labels.
+- PyQt GUI (`scripts/llava_gui_qt.py`) with mask list/filter, show/hide rejected overlays, truncated labels.
 - Mask proposals call a backend (`MASK_BACKEND_URL`) that can be Grounding DINO + SAM; dummy boxes on backend failure.
 - CLI runner: `scripts/run_llava_vqa.py` for one-off VQA.
 
@@ -34,19 +32,7 @@ print("cuda version:", torch.version.cuda)
 PY
 ```
 
-## Run the Tk GUI
-```bash
-conda activate blip
-cd D:\Joseph\FUN\VQA_annotation-helper
-python scripts\llava_gui.py
-```
-Workflow:
-1) Load `metadata.jsonl` (default iFixit path ok).
-2) Pick guide/step (or open image); auto-link if found.
-3) Run VQA for highlight bullets.
-4) Optional masks: proposes boxes; Accept/Reject; set `MASK_BACKEND_URL` for real backend.
-
-## Run the PyQt GUI (recommended)
+## Run the PyQt GUI
 ```bash
 conda activate blip
 cd D:\Joseph\FUN\VQA_annotation-helper
@@ -89,3 +75,6 @@ python scripts\mask_backend.py
 - First run downloads HF weights to cache.
 - Ensure `torch.cuda.is_available()` is True; CPU is very slow.
 - Keep datasets out of the repo; point the app to your local JSONL/images.
+
+
+
