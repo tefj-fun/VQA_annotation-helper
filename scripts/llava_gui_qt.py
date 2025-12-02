@@ -61,7 +61,10 @@ class LlavaQt(QtWidgets.QMainWindow):
         self.metadata: List[dict] = []
         self.guide_index = defaultdict(lambda: defaultdict(list))
         self.current_entry: Optional[dict] = None
+        self.path_index: Dict[str, dict] = {}
         self.data_dir = None
+        self.image_list: List[str] = []
+        self.image_pos: int = -1
 
         self.image_path = None
         self.orig_size = (1, 1)
@@ -119,6 +122,12 @@ class LlavaQt(QtWidgets.QMainWindow):
         self.open_img_btn = QtWidgets.QPushButton("Open image")
         self.open_img_btn.clicked.connect(self.open_image)
         btn_row.addWidget(self.open_img_btn)
+        self.prev_img_btn = QtWidgets.QPushButton("Prev")
+        self.prev_img_btn.clicked.connect(self.prev_image)
+        self.next_img_btn = QtWidgets.QPushButton("Next")
+        self.next_img_btn.clicked.connect(self.next_image)
+        btn_row.addWidget(self.prev_img_btn)
+        btn_row.addWidget(self.next_img_btn)
         self.run_vqa_btn = QtWidgets.QPushButton("Run VQA")
         self.run_vqa_btn.clicked.connect(self.run_vqa)
         btn_row.addWidget(self.run_vqa_btn)
@@ -229,6 +238,7 @@ class LlavaQt(QtWidgets.QMainWindow):
             return
         self.metadata.clear()
         self.guide_index.clear()
+        self.path_index.clear()
         self.data_dir = pathlib.Path(path).parent
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
@@ -237,8 +247,20 @@ class LlavaQt(QtWidgets.QMainWindow):
                 step_id = obj.get("step_id")
                 self.metadata.append(obj)
                 self.guide_index[gid][step_id].append(obj)
+                img_rel = obj.get("image_relpath") or obj.get("image", "")
+                if img_rel:
+                    abs_path = (self.data_dir / img_rel).resolve()
+                    self.path_index[str(abs_path)] = obj
         self.guide_combo.clear()
         self.guide_combo.addItems(sorted(self.guide_index.keys()))
+        # Build image list from metadata for navigation
+        self.image_list = []
+        for obj in self.metadata:
+            img_rel = obj.get("image_relpath") or obj.get("image", "")
+            if img_rel:
+                abs_path = str((self.data_dir / img_rel).resolve())
+                self.image_list.append(abs_path)
+        self.image_pos = -1
         self.append_log(f"Loaded metadata: {len(self.metadata)} rows")
 
     def on_guide_selected(self, gid: str):
@@ -263,7 +285,7 @@ class LlavaQt(QtWidgets.QMainWindow):
         img_rel = entry.get("image_relpath") or entry.get("image", "")
         img_path = str(self.data_dir / img_rel) if img_rel else ""
         if img_path and os.path.exists(img_path):
-            self.show_image(img_path)
+            self.set_image_path(img_path)
 
     # Image handling
     def open_image(self):
@@ -275,7 +297,39 @@ class LlavaQt(QtWidgets.QMainWindow):
         )
         if not path:
             return
-        self.show_image(path)
+        resolved = str(pathlib.Path(path).resolve())
+        entry = self.path_index.get(resolved)
+        if entry:
+            self.current_entry = entry
+            gid = str(entry.get("guide_id", ""))
+            step = str(entry.get("step_id", ""))
+            caption = entry.get("caption", "")
+            # sync combos without spamming signals
+            if gid and self.guide_combo.count() > 0:
+                idx = self.guide_combo.findText(gid)
+                if idx >= 0:
+                    self.guide_combo.blockSignals(True)
+                    self.guide_combo.setCurrentIndex(idx)
+                    self.guide_combo.blockSignals(False)
+                    steps = sorted(self.guide_index[gid].keys())
+                    self.step_combo.blockSignals(True)
+                    self.step_combo.clear()
+                    self.step_combo.addItems([str(s) for s in steps])
+                    step_idx = self.step_combo.findText(str(step))
+                    if step_idx >= 0:
+                        self.step_combo.setCurrentIndex(step_idx)
+                    self.step_combo.blockSignals(False)
+            self.step_info.setText(f"Guide: {gid} Step: {step}\nCaption: {caption}")
+        else:
+            self.current_entry = None
+        self.set_image_path(path)
+
+    def set_image_path(self, path: str):
+        """Set current image path, update position in list, and show image."""
+        resolved = str(pathlib.Path(path).resolve())
+        if resolved in self.image_list:
+            self.image_pos = self.image_list.index(resolved)
+        self.show_image(resolved)
 
     def show_image(self, path: str):
         img = Image.open(path).convert("RGB")
@@ -288,12 +342,70 @@ class LlavaQt(QtWidgets.QMainWindow):
         buf.seek(0)
         pix = QtGui.QPixmap()
         pix.loadFromData(buf.getvalue(), "PNG")
+        self.clear_masks()
         self.scene.clear()
         self.pixmap_item = self.scene.addPixmap(pix)
         self.scene.setSceneRect(QtCore.QRectF(pix.rect()))
         self.image_path = path
-        self.clear_masks()
+        if self.current_entry:
+            caption = self.current_entry.get("caption", "")
+            gid = self.current_entry.get("guide_id", "n/a")
+            step = self.current_entry.get("step_id", "n/a")
+            self.step_info.setText(f"Guide: {gid} Step: {step}\nCaption: {caption}")
+        else:
+            fname = os.path.basename(path)
+            self.step_info.setText(f"Guide: n/a Step: n/a\nCaption: (manual image)\nFile: {fname}")
         self.append_log(f"Loaded image: {path}")
+
+    def prev_image(self):
+        if not self.image_list:
+            return
+        if self.image_pos <= 0:
+            self.image_pos = 0
+        else:
+            self.image_pos -= 1
+        self._load_by_index()
+
+    def next_image(self):
+        if not self.image_list:
+            return
+        if self.image_pos < 0:
+            self.image_pos = 0
+        elif self.image_pos >= len(self.image_list) - 1:
+            self.image_pos = len(self.image_list) - 1
+        else:
+            self.image_pos += 1
+        self._load_by_index()
+
+    def _load_by_index(self):
+        if self.image_pos < 0 or self.image_pos >= len(self.image_list):
+            return
+        path = self.image_list[self.image_pos]
+        entry = self.path_index.get(path)
+        if entry:
+            self.current_entry = entry
+            gid = str(entry.get("guide_id", ""))
+            step = str(entry.get("step_id", ""))
+            caption = entry.get("caption", "")
+            # sync combos quietly
+            if gid and self.guide_combo.count() > 0:
+                idx = self.guide_combo.findText(gid)
+                if idx >= 0:
+                    self.guide_combo.blockSignals(True)
+                    self.guide_combo.setCurrentIndex(idx)
+                    self.guide_combo.blockSignals(False)
+                    steps = sorted(self.guide_index[gid].keys())
+                    self.step_combo.blockSignals(True)
+                    self.step_combo.clear()
+                    self.step_combo.addItems([str(s) for s in steps])
+                    step_idx = self.step_combo.findText(str(step))
+                    if step_idx >= 0:
+                        self.step_combo.setCurrentIndex(step_idx)
+                    self.step_combo.blockSignals(False)
+            self.step_info.setText(f"Guide: {gid} Step: {step}\nCaption: {caption}")
+        else:
+            self.current_entry = None
+        self.show_image(path)
 
     # VQA
     def run_vqa(self):
@@ -462,10 +574,18 @@ class LlavaQt(QtWidgets.QMainWindow):
         for m in self.masks:
             try:
                 item = m.get("item")
-                if item is not None and item.scene() is self.scene:
+                try:
+                    scene_ref = item.scene() if item is not None else None
+                except Exception:
+                    scene_ref = None
+                if item is not None and scene_ref is self.scene:
                     self.scene.removeItem(item)
                 text_item = m.get("text_item")
-                if text_item is not None and text_item.scene() is self.scene:
+                try:
+                    text_scene = text_item.scene() if text_item is not None else None
+                except Exception:
+                    text_scene = None
+                if text_item is not None and text_scene is self.scene:
                     self.scene.removeItem(text_item)
             except Exception:
                 pass
