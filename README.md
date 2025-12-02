@@ -1,26 +1,28 @@
-# VQA Annotation Helper (LLaVA GUI)
+﻿# VQA Annotation Helper (LLaVA GUI)
 
-Simple desktop helper to guide image annotation with a vision-language model. It loads a local dataset (e.g., iFixit JSONL + images), suggests what to highlight in each step, and can propose reviewable masks (placeholder logic included).
+Desktop helper to guide image annotation with a vision-language model. Loads a local dataset (e.g., iFixit JSONL + images), suggests what to highlight per step, and can propose reviewable masks via a backend (Grounding DINO + SAM) or a stub.
 
 ## Features
-- LLaVA 1.5 VQA (7B) via `transformers` with CUDA support.
-- Load metadata (`metadata.jsonl`) and browse guide/step captions; auto-link images to their step.
-- Prompt includes step context; output shows concise bullets (with class labels).
-- Scrollable output; simple mask proposal UI (dummy boxes now—swap with real detector/segmenter later).
-- CLI runner (`scripts/run_llava_vqa.py`) for quick one-off VQA on an image.
+- LLaVA 1.5 VQA (7B) via `transformers`, CUDA-capable.
+- Load `metadata.jsonl`, browse guide/step captions; auto-link images to steps.
+- Step-aware prompts; concise bullets with class labels/positions.
+- Two UIs:
+  - Tkinter GUI: `scripts/llava_gui.py`
+  - PyQt GUI: `scripts/llava_gui_qt.py` with mask list/filter, show/hide rejected overlays, truncated labels.
+- Mask proposals call a backend (`MASK_BACKEND_URL`) that can be Grounding DINO + SAM; dummy boxes on backend failure.
+- CLI runner: `scripts/run_llava_vqa.py` for one-off VQA.
 
 ## Requirements
-- Python 3.10+ (recommend a fresh conda env, e.g., `blip`).
-- NVIDIA GPU and CUDA-capable PyTorch (e.g., cu121 build).
-- Packages: torch (CUDA build), torchvision, transformers, pillow, datasets, peft, accelerate, bitsandbytes.
+- Python 3.10+ (fresh conda env recommended, e.g., `blip`).
+- NVIDIA GPU and CUDA PyTorch (e.g., cu121 build).
+- Packages: torch (CUDA build), torchvision, transformers, pillow, datasets, peft, accelerate, bitsandbytes, pyqt5.
 
 ## One-time setup (conda)
 ```bash
 conda create -n blip python=3.10 -y
 conda activate blip
-# install CUDA torch; use cu121 or cu118 to match your driver
 pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-pip install transformers datasets peft accelerate pillow bitsandbytes
+pip install transformers datasets peft accelerate pillow bitsandbytes pyqt5
 ```
 Verify GPU:
 ```bash
@@ -32,17 +34,33 @@ print("cuda version:", torch.version.cuda)
 PY
 ```
 
-## Run the GUI
+## Run the Tk GUI
 ```bash
 conda activate blip
 cd D:\Joseph\FUN\VQA_annotation-helper
 python scripts\llava_gui.py
 ```
 Workflow:
-1) Click "Load Metadata" and select your `metadata.jsonl` (default expected at `D:\Joseph\FUN\ifixit\datasets\ifixit_blip_en\metadata.jsonl` or wherever your JSONL lives).
-2) Pick a guide and step (or open an image; it will auto-link if found in JSONL).
-3) Click "Run VQA" to get highlight suggestions (bullets with class labels/positions). Output shows only the assistant text.
-4) (Optional) Click "Propose masks" to draw placeholder boxes from the suggestions; accept/reject to simulate review. Replace the placeholder logic with a real backend when ready.
+1) Load `metadata.jsonl` (default iFixit path ok).
+2) Pick guide/step (or open image); auto-link if found.
+3) Run VQA for highlight bullets.
+4) Optional masks: proposes boxes; Accept/Reject; set `MASK_BACKEND_URL` for real backend.
+
+## Run the PyQt GUI (recommended)
+```bash
+conda activate blip
+cd D:\Joseph\FUN\VQA_annotation-helper
+python scripts\llava_gui_qt.py
+```
+Workflow:
+- Load metadata, pick guide/step (or open image). Caption and image auto-link.
+- Run VQA; answers are line-wrapped.
+- Propose masks:
+  - Backend at `MASK_BACKEND_URL` (default `http://localhost:8000/propose_masks`).
+  - Score threshold filter.
+  - Click list row to highlight overlay; Accept/Reject set color/status.
+  - Toggle “Show rejected masks” to hide/show rejected rows and overlays.
+  - Labels in list are truncated to keep UI compact.
 
 ## CLI VQA
 ```bash
@@ -55,15 +73,19 @@ python scripts\run_llava_vqa.py ^
   --use-fast --max-new-tokens 64
 ```
 
-## Mask Backend Stub
-A placeholder FastAPI service is in `scripts/mask_backend_stub.py`. It returns random boxes; replace with Grounding DINO + SAM/SAM2 to generate real masks per VQA label.
-Run stub (dev):
+## Mask Backend
+- `scripts/mask_backend_stub.py`: random boxes (dev).
+- `scripts/mask_backend.py`: Grounding DINO (`IDEA-Research/grounding-dino-base`) + optional SAM (set `SAM_CHECKPOINT`, `SAM_MODEL_TYPE`). Returns polygons when SAM is set, else boxes.
+Run:
 ```bash
+# stub
 python scripts\mask_backend_stub.py
-# will serve at http://localhost:8000/propose_masks
+# real backend
+python scripts\mask_backend.py
+# POST /propose_masks with {image_path, labels, box_threshold, text_threshold, top_k, return_masks}
 ```
 
 ## Notes
-- First model run will download weights to HF cache (`C:\Users\Supplier\.cache\huggingface\hub\...`).
-- Ensure `torch.cuda.is_available()` is True before running; otherwise LLaVA will be very slow on CPU.
+- First run downloads HF weights to cache.
+- Ensure `torch.cuda.is_available()` is True; CPU is very slow.
 - Keep datasets out of the repo; point the app to your local JSONL/images.

@@ -14,7 +14,9 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from collections import defaultdict
 import pathlib
+from typing import Any, Dict, List
 
+import requests
 from PIL import Image, ImageTk
 import torch
 from transformers import AutoModelForImageTextToText, AutoProcessor
@@ -22,6 +24,7 @@ from transformers import AutoModelForImageTextToText, AutoProcessor
 
 MODEL_ID = "llava-hf/llava-1.5-7b-hf"
 DEFAULT_METADATA = r"D:\Joseph\FUN\ifixit\datasets\ifixit_blip_en\metadata.jsonl"
+MASK_BACKEND_URL = os.environ.get("MASK_BACKEND_URL", "http://localhost:8000/propose_masks")
 
 
 class LlavaGUI(tk.Tk):
@@ -83,7 +86,9 @@ class LlavaGUI(tk.Tk):
         self.canvas_image_id = None
         self.photo = None
         self.display_size = (800, 600)
+        self.orig_size = (1, 1)
         self.masks = []
+        self.selected_mask_idx = None
 
         # Step info / guidance
         self.step_info_label = tk.Label(
@@ -117,7 +122,15 @@ class LlavaGUI(tk.Tk):
         tk.Button(mask_frame, text="Reject", command=self.reject_mask).pack(
             side="left", padx=5
         )
+        tk.Label(mask_frame, text="Score >=").pack(side="left")
+        self.score_threshold_var = tk.DoubleVar(value=0.30)
+        tk.Entry(mask_frame, textvariable=self.score_threshold_var, width=6).pack(
+            side="left", padx=3
+        )
+        self.mask_info_label = tk.Label(mask_frame, text="Mask prompts: n/a")
+        self.mask_info_label.pack(fill="x", padx=5, pady=2)
         self.mask_list = tk.Listbox(mask_frame, height=5)
+        self.mask_list.bind("<<ListboxSelect>>", self.on_mask_select)
         self.mask_list.pack(fill="x", expand=True, padx=10)
 
         # Log area
@@ -166,6 +179,7 @@ class LlavaGUI(tk.Tk):
             thumb = img.copy()
             thumb.thumbnail((1100, 700))
             self.photo = ImageTk.PhotoImage(thumb)
+            self.orig_size = img.size
             self.display_size = (thumb.width, thumb.height)
             self.canvas.config(width=thumb.width, height=thumb.height)
             self.canvas.delete("all")
@@ -386,7 +400,7 @@ class LlavaGUI(tk.Tk):
             f"- Step caption: {caption}\n"
             f"- Language: {language}\n\n"
             "Instructions:\n"
-            "- Return 1–3 bullets starting with 'Highlight ...' that are relevant to this step.\n"
+            "- Return 1-3 bullets starting with 'Highlight ...' that are relevant to this step.\n"
             "- Include a short class/label in parentheses (e.g., 'Highlight keyboard ribbon connector (class: connector), center-right near logic board').\n"
             "- Use short, actionable bullets: what it is + where it is in the image.\n"
             "- Only refer to items that are relevant to the step caption; ignore unrelated objects. If unsure something is visible, say 'uncertain'.\n"
@@ -396,9 +410,9 @@ class LlavaGUI(tk.Tk):
             "- Output only bullets, no extra text."
         )
 
-    # Mask proposal stubs
+    # Mask proposal with backend (fallback to dummy boxes if backend fails)
     def propose_masks(self):
-        """Create simple placeholder masks from the current answer lines."""
+        """Request masks from backend per VQA label; fallback to dummy boxes on failure."""
         self.clear_masks()
         lines = [
             ln.strip()
@@ -408,31 +422,94 @@ class LlavaGUI(tk.Tk):
         if not lines:
             self.append_log("[INFO] No answer text to propose masks from.")
             return
+        labels = [ln.lstrip("*- ").strip() for ln in lines]
+        self.mask_info_label.config(text=f"Mask prompts: {labels}")
+        self.selected_mask_idx = None
         w, h = self.display_size
-        for idx, ln in enumerate(lines):
-            # naive box placement for demo purposes
-            box_w = max(50, w // 4)
-            box_h = max(50, h // 4)
-            x1 = (10 + idx * 40) % max(1, w - box_w)
-            y1 = (10 + idx * 40) % max(1, h - box_h)
-            x2, y2 = x1 + box_w, y1 + box_h
-            rect_id = self.canvas.create_rectangle(
-                x1, y1, x2, y2, outline="yellow", width=2
+        try:
+            threshold = float(self.score_threshold_var.get())
+        except Exception:
+            threshold = 0.0
+        proposals: List[Dict[str, Any]] = []
+        try:
+            if self.image_path is None:
+                raise RuntimeError("No image loaded for mask proposal")
+            payload = {
+                "image_path": self.image_path,
+                "labels": labels,
+                "box_threshold": 0.25,
+                "text_threshold": 0.25,
+                "top_k": 3,
+                "return_masks": True,
+            }
+            resp = requests.post(MASK_BACKEND_URL, json=payload, timeout=30)
+            resp.raise_for_status()
+            proposals = [
+                p for p in resp.json() if p.get("score", 0.0) >= threshold
+            ]
+            self.append_log(
+                f"[INFO] Masks from backend: {len(proposals)} proposals (score>={threshold})"
             )
+        except Exception as exc:
+            self.append_log(f"[WARN] Backend mask proposal failed: {exc}. Using dummy boxes.")
+            for idx, lbl in enumerate(labels):
+                box_w = max(50, w // 4)
+                box_h = max(50, h // 4)
+                x1 = (10 + idx * 40) % max(1, w - box_w)
+                y1 = (10 + idx * 40) % max(1, h - box_h)
+                proposals.append(
+                    {
+                        "label": lbl,
+                        "score": 0.5,
+                        "bbox": [x1, y1, x1 + box_w, y1 + box_h],
+                        "polygon": None,
+                    }
+                )
+        sx = self.display_size[0] / max(1, self.orig_size[0])
+        sy = self.display_size[1] / max(1, self.orig_size[1])
+        for idx, prop in enumerate(proposals):
+            lbl = prop.get("label", f"item-{idx}")
+            score = prop.get("score", 0.0)
+            poly = prop.get("polygon")
+            rect_id = None
+            text_id = None
+            base_color = prop.get("color", "yellow")
+            if poly:
+                scaled_poly = [(x * sx, y * sy) for x, y in poly]
+                flat = [coord for xy in scaled_poly for coord in xy]
+                rect_id = self.canvas.create_polygon(
+                    *flat, outline=base_color, fill="", width=2
+                )
+                xs = [xy[0] for xy in scaled_poly]
+                ys = [xy[1] for xy in scaled_poly]
+                anchor_x = min(xs)
+                anchor_y = min(ys)
+            else:
+                x1, y1, x2, y2 = prop.get("bbox", [10, 10, 60, 60])
+                x1, y1, x2, y2 = x1 * sx, y1 * sy, x2 * sx, y2 * sy
+                rect_id = self.canvas.create_rectangle(
+                    x1, y1, x2, y2, outline=base_color, width=2
+                )
+                anchor_x, anchor_y = x1, y1
             text_id = self.canvas.create_text(
-                x1 + 5, y1 + 10, anchor="nw", fill="yellow", text=f"{idx}: pending"
+                anchor_x + 5,
+                anchor_y + 10,
+                anchor="nw",
+                fill=base_color,
+                text=f"{idx}: pending (score {score:.2f})",
             )
             self.masks.append(
                 {
-                    "label": ln,
-                    "bbox": (x1, y1, x2, y2),
+                    "label": lbl,
+                    "score": score,
                     "status": "pending",
                     "rect_id": rect_id,
                     "text_id": text_id,
+                    "color": base_color,
                 }
-            )
-            self.mask_list.insert("end", f"{idx}: {ln} [pending]")
 
+            )
+            self.mask_list.insert("end", f"{idx}: {lbl} [pending] score={score:.2f}")
     def accept_mask(self):
         sel = self.mask_list.curselection()
         if not sel:
@@ -452,6 +529,8 @@ class LlavaGUI(tk.Tk):
             return
         m = self.masks[idx]
         m["status"] = status
+        m["color"] = color
+        self.selected_mask_idx = idx
         self.canvas.itemconfig(m["rect_id"], outline=color)
         self.canvas.itemconfig(m["text_id"], fill=color, text=f"{idx}: {status}")
         self.mask_list.delete(idx)
@@ -466,9 +545,25 @@ class LlavaGUI(tk.Tk):
                 pass
         self.masks = []
         self.mask_list.delete(0, "end")
+        self.selected_mask_idx = None
+
+    def on_mask_select(self, event=None):
+        sel = self.mask_list.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if self.selected_mask_idx is not None and 0 <= self.selected_mask_idx < len(
+            self.masks
+        ):
+            prev = self.masks[self.selected_mask_idx]
+            self.canvas.itemconfig(prev["rect_id"], outline=prev.get("color", "yellow"))
+        self.selected_mask_idx = idx
+        m = self.masks[idx]
+        self.canvas.itemconfig(m["rect_id"], outline="cyan")
 
 
 
 if __name__ == "__main__":
     app = LlavaGUI()
     app.mainloop()
+
